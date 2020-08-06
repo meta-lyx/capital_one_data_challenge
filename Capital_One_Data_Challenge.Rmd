@@ -1,0 +1,428 @@
+---
+title: "Capital One Data Challenge"
+author: "Claire Li"
+date: "January 18th, 2019"
+output: html_document
+---
+# {.tabset}
+## Business Problem
+
+
+**Business Problem**
+
+
+  A real estate company would like to know which zip codes would generate the most profit on short term rentals within New York City. It has decided that two Bedrooms properties are the most profitable. Our task here is to help them discover the best zip codes to invest in.
+  
+  
+  
+**Data Usage**
+
+  *Airbnb Dataset*
+  
+  
+  
+   The company plan to use Airbnb to lease out their investment property. The [Airbnb](http://insideairbnb.com/get-the-data.html)  dataset thus provides **revenue** data. It contains Airbnb listings such as locations, number of bedrooms, services, host details, cleaning fee, rent prices, reviews and ratings.
+
+
+ *Zillow zip Dataset*
+ 
+ 
+   The [zip](https://www.zip.com/research/data/) dataset provides __cost__ data. It gives an estimate of value for two-bedroom properties from April 1996 up until June 2017.
+   
+**Assumptions**
+
+
+* The investor will pay for the property in cash (i.e. no mortgage/interest rate will need to be accounted for). 
+
+
+* The time value of money discount rate is 0% (i.e. $1 today is worth the same 100 years from now).
+
+
+* All properties and all square feet within each locale can be assumed to be homogeneous (i.e. a 1000 square foot property in a locale such as Bronx or Manhattan generates twice the revenue and costs twice as much as any other 500 square foot property within that same locale.)
+
+
+* The occupancy rate is assumed to be 75%
+
+
+* We assume that the company charges the same rent as the Airbnb host every night so as to use the Airbnb data as a reference for future rent estimate
+
+
+* We assume that there is no disruption to the general economic environment in the recent future
+
+
+* We assume that the agency is interested in selling the properties in the future
+
+
+* Assuming that two bedrooms have the same square footage.
+
+```{r set up,  include=FALSE}
+library(tidyverse)
+library(plyr)
+library(colorspace)
+library(plotly)
+library(forecast)
+library(astsa)
+library(data.table)
+library(Amelia)
+library(mice)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(scales)
+library(leaflet)
+library(SentimentAnalysis)
+library(lubridate)
+library(tm)
+library(SnowballC)
+library(wordcloud)
+library(RColorBrewer)
+library(imputeTS)
+library(devtools)
+library(choroplethrZip)
+library(ggplot2)
+```
+
+## Data Quality
+
+***Data dimension***
+
+
+```{r warning = F,  warning=FALSE, include=FALSE} 
+listings <- read_csv("C:/Users/Claire Li/Desktop/Capital One/listings.csv")
+zip <- read_csv("C:/Users/Claire Li/Desktop/Capital One/Zip_Zhvi_2bedroom.csv")
+```
+
+```{r warning = F}
+dim(listings)
+```
+
+The listings data contains `r nrow(listings)` rows and `r ncol(listings)` columns. 
+
+```{r warning = F}
+dim(zip)
+```
+
+The zip dataset contains `r nrow(zip)` rows and `r ncol(zip)` columns. 
+
+***Preliminary cleaning of the Zillow listings dataset***
+
+Here we drop a lot of variables that are not pertinent to this analysis. Because this is only a preliminary cleaning, we create a dataset called "ori_listings" in case we need to come back and grab the original listings dataset. 
+```{r warning = F, include = F}
+listings <- listings %>% select(-contains("host"))
+listings <- listings %>% select(-contains("url"))
+
+```
+
+***Glimpse at the data***
+
+The listings dataset from Airbnb contains information about the property's location, price, host, reviews, etc.
+
+```{r warning = F, echo = F}
+kable(head(listings))  %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+The zip codes dataset from zip is more straighforward as it contains the property's location and its price from 1996 to 2017.
+```{r warning = F, echo = F}
+kable(zip[1:10,])  %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "responsive")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+###Missing data check
+
+
+**The first graph illustrates missing data in the listings dataset.**
+
+
+Missing data predominately exist in the varaibles that are not associated with this case study thus we are not worried about this currently.
+
+```{r warning=F, echo = F} 
+listings_missing <- sapply(listings, function(x) sum(length(which(is.na(x)))))  
+zip_missing <- sapply(zip, function(x) sum(length(which(is.na(x)))))  
+```
+
+```{r warning = F, echo = F}
+missingList<- as.data.frame(listings_missing)
+
+setDT(missingList, keep.rownames = "ID")
+
+missingList <-  filter(missingList, listings_missing > 100)
+#missingList <- missingList[order(missingList$listings_missing),]
+
+plotMissingList <- ggplot(missingList, mapping = aes(x = reorder(ID,listings_missing), listings_missing, fill  = listings_missing), listings_missing) + 
+  geom_bar(stat = "identity") + 
+  coord_flip() +
+  scale_fill_gradient(low="blue", high="red") +
+  ggtitle("Missing data points in Airbnb listings") + 
+  labs( x = "Variables", y = "Counts", 
+       subtitle = "Displaying variables with more than 100 NAs") + 
+  theme_minimal()
+
+plotMissingList
+```
+
+
+     
+**The first graph illustrates missing data in the Zillow zip code dataset.**
+
+
+The missing values for the Zillow listings are mostly very old time series data. Because the following analysis will only use time series data from recent years, we are not worried about this either.
+
+
+```{r warning = F, echo = F, include = F}
+missingZip <- as.data.frame(zip_missing)
+setDT(missingZip, keep.rownames = "time")
+#missingZip <-  filter(missingZip, zip_missing > 1000)
+
+missingZip$time <- format(parse_date_time(missingZip$time, "ym"),"%Y")
+#missingZip <- missingZip[order(missingZip$zip_missing),]
+
+plotMissingZip <- ggplot(missingZip, mapping = aes(x = reorder(time, zip_missing), zip_missing, fill = zip_missing), zip_missing ) +
+  geom_bar(stat = "identity") + 
+  coord_flip() +
+  scale_fill_gradient(low="blue", high="red") +
+  ggtitle("Missing data points in zip zip codes") + 
+  labs( x = "Years", y = "Counts") + 
+  theme_minimal()
+```
+
+```{r warning = F}
+plotMissingZip
+```
+
+
+
+
+***Filtering out only the properties in the New York market and have two bedrooms***
+
+**Plugging in the variables above that are applicable to this case study, and filtering out only the properties in New York market and those that have two bedrooms**
+
+```{r warning = F}
+city_name <- "New York"
+bedroom_no <- 2
+occupancy_rate <- 0.75
+columns <- c("zipcode",
+              "price",
+              "weekly_price", 
+              "monthly_price",
+              "longitude",
+              "latitude",
+              "name",
+              "room_type",
+              "property_type",
+              "neighborhood_overview",
+              "neighbourhood_group_cleansed",
+              "reviews_per_month",
+              "review_scores_rating",
+              "neighborhood_overview",
+              "transit", 
+              "amenities"
+              )
+
+```
+
+
+```{r warning=FALSE} 
+listings_ny <- listings %>% filter(market == city_name, bedrooms == bedroom_no) %>%
+  select(columns)
+
+listings_ny <- listings_ny[, colMeans(is.na(listings_ny)) <= 0.5]
+listings_ny$price <- as.numeric(gsub("\\$","",listings_ny$price))
+listings_ny$price <- as.numeric(gsub("\\,","",listings_ny$price))
+
+```
+
+The New York market contains `r ncol(listings_ny)` columns. There are `r nrow(listings_ny)` rows.
+
+
+## Explore Data via Visualization
+
+
+A more direct way to look at how the short-term rentals distribute across NYC is via map as they all say: a picture is worth a thousand words.
+
+We see that a lot of the market is concentrated on the island, meaning Manhattan has a lot of options for the agency to choose from. However, as we will see later, this does not necessarily mean that the agency should invest in properties in SoHo, lower Manhattan or Hell's Kitchen.
+```{r warning=F} 
+
+leaflet(listings_ny) %>%
+  addTiles() %>%
+  addMarkers( ~longitude, ~latitude,labelOptions = labelOptions(noHide = F),
+              clusterOptions = markerClusterOptions(),
+             popup = paste0("<b></b>", listings_ny$name, 
+                            "<br> <b> Dollar Price per Night: </b>", listings_ny$price)) %>% 
+  setView(mean(listings_ny$longitude), mean(listings_ny$latitude), zoom = 11) %>%
+  addProviderTiles("CartoDB.Voyager")%>%
+  addMiniMap(tiles = providers$Esri.OceanBasemap, width = 120, height=80)
+
+```
+
+The following graph proves that the NYC housing market is uprising, and the time to enter this market is NOW.
+```{r warning=F} 
+zip_ny <- filter(zip, Metro == city_name)
+#colnames(zip_ny)[2] <- "zipcode"
+zip_ny$RegionName <- as.numeric(zip_ny$RegionName)
+df <- merge(zip_ny, listings_ny, by.x = "RegionName", by.y = "zipcode")
+df <- df[, -(8:237)]
+
+plot_price <- zip_ny[,c(2,238:262)] 
+plot_price <- gather(plot_price, mon, value, `2015-06`:`2017-06`, factor_key=TRUE)
+plot_price$mon <- parse_date_time(plot_price$mon, "ym")
+
+plot_price <- plot_price %>%
+  group_by(mon, RegionName) %>%
+  summarise(value = median(value))
+
+ggplot(plot_price, aes(x = mon, y = value, fill = value)) +
+  geom_histogram(stat = "identity")+
+  scale_fill_gradient(low="blue", high="red") +
+  ggtitle("Housing price trend") + 
+  scale_y_continuous(limits=c(9.0e+07, 1.1e+08), oob = rescale_none)+
+  labs(x = NULL, y = "Dollar") + 
+  theme_minimal() 
+
+```
+
+
+## Data Analysis
+
+
+Under the assumption that the agency will sell the property sometime in the future, we want to forecast the rate at which the properties increase in value as this will be a huge return on investment.
+
+Filter out zillow listings that are in New York City and that has two bedrooms. 
+From the time series data, we can reasonably predict housing values from 2020 to 2024, and calculate the repective increase rate for each zipcode.
+```{r warning = F}
+filterZillow <- function(zillow,cityName){
+  zillow <- zillow[,-c(1,4:6)]
+  zillow <- filter(zillow, City == cityName) 
+  colnames(zillow)[1] <- "zipcode" 
+  return(zillow)
+}
+
+cityName ="New York"
+zillow <- filterZillow(zip,cityName) 
+output <- NULL  
+
+x <- c(1:nrow(zillow))
+
+for(i in x){
+  data <- as.vector(t(zillow[,c(4:ncol(zillow))])[,i])
+  price = ts(data,start = c(1996,4),frequency = 12)
+  price <- na.ma(price, k = 4, weighting = "exponential")
+  fit = auto.arima(price, allowdrift=FALSE)
+  pred = predict(fit, n.ahead = 49, se.fit=T)
+  output[[i]] <- t(as.data.frame(pred$pred)[c(1,13,25,37,49),])
+  }
+
+prediction <- data.frame(matrix(unlist(output), nrow=length(output), byrow=T))
+colnames(prediction)[1:5] <- c("2020-01-01","2021-01-01","2022-01-01","2023-01-01","2024-01-01")
+
+housevalue <- cbind(zillow[,c(1,2,3)],prediction)
+
+colnames(housevalue) <- c("zipcode","city","sizerank","start","xx1","xx2","xx3","end")
+
+housevalue$increase <- (housevalue$end/housevalue$start)^0.25 - 1
+```
+
+### Zip codes that see biggest increase in their housing value
+
+We know that housing prices often see robust increase over years in places like New York City because demand far exceeds supply in the long run. The zip codes that would undergo the biggest increase in their housing values are marked in dark red. There are areas in Staten Island that are very promising in terms of generating profit when the agency decides to sell the property.
+
+```{r warning = F, include = F}
+priceIncrease <- housevalue %>% select(-c(2:8))
+colnames(priceIncrease)<- c("region","value")
+
+priceIncrease$region <- as.character(priceIncrease$region)
+plotIncrease <- zip_choropleth(priceIncrease,
+                                     county_zoom = c(36005, 36047, 36061, 36081, 36085),
+                                     title = "Price Increase by Zip Code",
+                                     legend = "Average Increase") + 
+  ggtitle("Which zip codes are getting more expensive?",
+  subtitle = "Displaying zip codes with fastest growing housing prices") +
+  theme(plot.caption = element_text(color = "grey35")) +
+  scale_color_gradient(low="#d3cbcb", high="#852eaa") + 
+  scale_fill_brewer("Average Increase",palette="Reds")
+```
+
+
+```{r warning = F}
+plotIncrease
+```
+
+```{r warning = F}
+priceTop <- arrange(priceIncrease, desc(value)) %>%
+  group_by(region) %>%
+  top_n(15)
+
+kable(head(priceTop))
+
+```
+
+
+
+### Zip codes with highest Revenue
+
+ote that we are not considering management cost which would correlate with the sqaure feet of the property. For the following analysis alone, we can say that the higher the rental price, the higher the revenue that the property would generate over the years. 
+
+```{r warning = F}
+
+names(listings_ny)[names(listings_ny) == "price"] <- "rent"
+
+rentTop <- arrange(listings_ny, desc(rent)) %>%
+  group_by(zipcode)%>%
+  top_n(15)
+
+rentTop <- rentTop %>% select(c(1,2))
+
+kable(head(rentTop))
+```
+
+
+###  What kind of amenities do short-term renters look for?
+
+
+The WordCloud below gives an idea of what the hosts are providing which is a good indicator of what the guests are looking for when seeking short-term rentals. In New York City, we can see that Brooklyn is an appealing choice as well as **
+```{r warning=F} 
+text <- listings_ny
+docs <- Corpus(VectorSource(text))
+toSpace <- content_transformer(function (x , pattern ) gsub(pattern, " ", x))
+docs <- tm_map(docs, toSpace, "/")
+docs <- tm_map(docs, toSpace, "@")
+docs <- tm_map(docs, toSpace, "\\|")
+docs <- tm_map(docs, content_transformer(tolower))
+docs <- tm_map(docs, removeNumbers)
+docs <- tm_map(docs, removeWords, stopwords("english"))
+docs <- tm_map(docs, removeWords, c("blabla1", "blabla2")) 
+docs <- tm_map(docs, removePunctuation)
+docs <- tm_map(docs, stripWhitespace)
+dtm <- TermDocumentMatrix(docs)
+m <- as.matrix(dtm)
+v <- sort(rowSums(m),decreasing=TRUE)
+d <- data.frame(word = names(v),freq=v)
+set.seed(1234)
+wordcloud(words = d$word, freq = d$freq, min.freq = 1,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+```
+
+## Recommendations and Future Directions
+
+* The zip codes that will see the biggest increase in their housing values are, in descending order, 10028(Upper East Side), 10128(Upper East Side), 10305(Staten Island), 10306(Staten Island), 10308(Staten Island), 10314(Staten Island). We see that although Manhattan has the most options, it does not appear to the best investment. On the contrary, it is on Staten Island and in Upper East Side that the properties appreciate the fastest.
+
+
+* The zip codes that have the highest rent and thus generate the most revenues are, in descending order, 11375(Queens), 11691(Queens), 10038(Downtown), 11231(Brooklyn), 10001(Chelsea), 10069(Upper East Side).
+
+
+* In hindsight, using linear regression to predict housing prices would not be a bad idea in that a lot of the varaible provided in the Airbnb dataset can be used as predictors for nightly rent such as neighborhood, transit, access, amenities. However, this approach works only if we are trying to recalibrate the current prices that the hosts are charging. Factoring in future trend seems like the most reasonable approach so far.
+
+
+* Regarding the prices that the hosts are charging, I would like to re-evaluate the relationship between availability and the current price. In other words, the relationship between demand and supply is not clear and the prices are not statistically proven to be the highest possible price. The availability indicators are selected at first, but later dropped because there are a lot of missing values.
+
+
+* This forecast deploys an easy model and assumes seasonality and does not check for statonarity upfront which is standard procedure in time series forecast.
+
+
+* Another perspective to look at this is to look at demographics. 
+
+
+* Profit model: the model that would fit this type of investment takes a __one-time outflow of cash.__ Over the years, the real estate agency would generate revenue from the __rent__ it collects minus the cost of __managing the properties.__ In the end, the real estate company may sell the property and gain another profit from the __increase in housing price.__ This analysis only looks at the aspect of rent and housing price, without considering the cost of managing the property nor the concurrent increase of rent over the years. It also does not factor in the occupancy rate of 0.75, which presumably would be higher in Manhattan where the maintenance cost is high and housing price increase low. With this logic in mind, although high occupancy rate brings in more revenue, it is counterproductive to high cost and relatively low payback.
